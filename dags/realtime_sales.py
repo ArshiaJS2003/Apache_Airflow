@@ -1,6 +1,6 @@
 """
-Real-time Sales Data Generator DAG
-Runs every 10 seconds, generating simulated sales records into DuckDB.
+Real-time Sales Data Updater DAG
+Keeps 25,000 rows fixed and updates values randomly every run.
 """
 
 import random
@@ -12,6 +12,7 @@ from airflow.decorators import dag, task
 from airflow.timetables.trigger import DeltaTriggerTimetable
 
 DB_PATH = "/tmp/sales_data.duckdb"
+RECORDS = 25000  # fixed rows
 
 PRODUCTS = [
     ("Laptop", 799.99, 1299.99),
@@ -29,22 +30,24 @@ CHANNELS = ["Online", "In-Store", "Mobile App"]
 
 
 @dag(
-    dag_id="realtime_sales",
-    description="Generates simulated real-time sales data every 10 seconds",
+    dag_id="realtime_sales_update",
+    description="Maintains 25K rows and updates them like real-time",
     start_date=datetime(2025, 1, 1, tzinfo=timezone.utc),
     schedule=DeltaTriggerTimetable(timedelta(seconds=10)),
     catchup=False,
     max_active_runs=1,
-    tags=["sales", "realtime", "demo"],
+    tags=["sales", "realtime"],
 )
 def realtime_sales():
+
     @task
     def init_database():
-        """Create the sales table if it doesn't exist."""
         con = duckdb.connect(DB_PATH)
+
+        # Create table
         con.execute("""
             CREATE TABLE IF NOT EXISTS sales (
-                sale_id VARCHAR,
+                sale_id INTEGER,
                 sale_time TIMESTAMP,
                 product VARCHAR,
                 price DOUBLE,
@@ -54,53 +57,82 @@ def realtime_sales():
                 channel VARCHAR
             )
         """)
-        con.close()
 
-    @task
-    def generate_sales():
-        """Generate 1-3 random sales records per run."""
-        con = duckdb.connect(DB_PATH)
-        num_records = random.randint(1, 3)
+        # Insert only once if empty
+        count = con.execute("SELECT COUNT(*) FROM sales").fetchone()[0]
 
-        for _ in range(num_records):
-            product, min_price, max_price = random.choice(PRODUCTS)
-            price = round(random.uniform(min_price, max_price), 2)
-            quantity = random.randint(1, 5)
-            total = round(price * quantity, 2)
-            region = random.choice(REGIONS)
-            channel = random.choice(CHANNELS)
-            sale_id = f"SALE-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{random.randint(1000, 9999)}"
+        if count == 0:
+            records = []
+            now = datetime.now(timezone.utc)
 
-            con.execute(
-                """
-                INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    sale_id,
-                    datetime.now(timezone.utc),
+            for i in range(RECORDS):
+                product, min_price, max_price = random.choice(PRODUCTS)
+                price = round(random.uniform(min_price, max_price), 2)
+                quantity = random.randint(1, 5)
+
+                records.append((
+                    i,
+                    now,
                     product,
                     price,
                     quantity,
-                    total,
-                    region,
-                    channel,
-                ],
-            )
+                    round(price * quantity, 2),
+                    random.choice(REGIONS),
+                    random.choice(CHANNELS)
+                ))
+
+            con.executemany("""
+                INSERT INTO sales VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, records)
 
         con.close()
-        return f"Generated {num_records} sales records"
 
     @task
-    def cleanup_old_data():
-        """Keep only the last 24 hours of data to prevent unbounded growth."""
+    def update_sales():
+        """Update all 25K rows with new random values"""
         con = duckdb.connect(DB_PATH)
-        con.execute("""
-            DELETE FROM sales
-            WHERE sale_time < NOW() - INTERVAL '24 hours'
-        """)
+
+        now = datetime.now(timezone.utc)
+
+        # Fetch all IDs
+        ids = con.execute("SELECT sale_id FROM sales").fetchall()
+
+        updated_records = []
+
+        for (sale_id,) in ids:
+            product, min_price, max_price = random.choice(PRODUCTS)
+            price = round(random.uniform(min_price, max_price), 2)
+            quantity = random.randint(1, 5)
+
+            updated_records.append((
+                now,
+                product,
+                price,
+                quantity,
+                round(price * quantity, 2),
+                random.choice(REGIONS),
+                random.choice(CHANNELS),
+                sale_id
+            ))
+
+        # Bulk update
+        con.executemany("""
+            UPDATE sales
+            SET sale_time = ?,
+                product = ?,
+                price = ?,
+                quantity = ?,
+                total = ?,
+                region = ?,
+                channel = ?
+            WHERE sale_id = ?
+        """, updated_records)
+
         con.close()
 
-    init_database() >> generate_sales() >> cleanup_old_data()
+        return "Updated 25,000 rows with new random values"
+
+    init_database() >> update_sales()
 
 
 realtime_sales()
